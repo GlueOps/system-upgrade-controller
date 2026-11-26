@@ -1,0 +1,53 @@
+# What the prepare scripts need on top of SUC's own drainer role (SA system-upgrade).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: os-patch-prepare
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]   # list control planes, cordon
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]            # blocking pods on the node
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: os-patch-prepare
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: os-patch-prepare
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade
+    namespace: system-upgrade
+---
+# etcdctl runs inside the etcd static pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: os-patch-etcd-check
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: os-patch-etcd-check
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: os-patch-etcd-check
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade
+    namespace: system-upgrade

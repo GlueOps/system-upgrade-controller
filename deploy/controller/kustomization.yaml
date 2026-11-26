@@ -1,0 +1,56 @@
+# Everything that is the same for every client: rancher/system-upgrade-controller straight from its
+# GitHub release (plus a few GlueKube changes), the patch scripts and the RBAC they need.
+# The Plans are per client and applied separately with kubectl (see plans/).
+# Upgrade SUC: change the version in both URLs.
+#
+# A change to scripts/ changes the Plans' hash on every cluster that syncs it, so every node gets
+# patched again at its next window. Roll script changes out by moving each client's pinned revision.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Creates the system-upgrade namespace, labelled privileged.
+  - https://github.com/rancher/system-upgrade-controller/releases/download/v0.21.1/crd.yaml
+  - https://github.com/rancher/system-upgrade-controller/releases/download/v0.21.1/system-upgrade-controller.yaml
+  - rbac-prepare.yaml
+
+secretGenerator:
+  # Mounted by the Plans at /run/system-upgrade/secrets/os-patch-scripts (fixed name: no hash suffix).
+  - name: os-patch-scripts
+    namespace: system-upgrade
+    files:
+      - scripts/check-etcd.sh
+      - scripts/wait-for-jobs.sh
+      - scripts/upgrade.sh
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        # Never pruned by Argo CD: the Plans and any running Job depend on it.
+        argocd.argoproj.io/sync-options: Prune=false
+
+patches:
+  # With no requests the controller is BestEffort: the first pod the kubelet evicts under memory
+  # pressure, and it can't be scheduled back onto a node tainted memory-pressure. Requests make it
+  # Burstable (tolerates that taint).
+  # The controller reads default-controller-env only at start: bump env-rev whenever the
+  # ConfigMap patch below changes, so the pod restarts.
+  - target: {kind: Deployment, name: system-upgrade-controller}
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests: {cpu: 10m, memory: 64Mi}
+          limits: {memory: 256Mi}
+      - op: add
+        path: /spec/template/metadata/annotations
+        value:
+          gluekube.io/env-rev: "1"
+
+  - target: {kind: ConfigMap, name: default-controller-env}
+    patch: |
+      # Runs the drain. Keep within one minor version of the cluster (upstream: v1.30.3).
+      - {op: replace, path: /data/SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE, value: "rancher/kubectl:v1.35.6"}
+      # Upstream: Always.
+      - {op: replace, path: /data/SYSTEM_UPGRADE_JOB_IMAGE_PULL_POLICY, value: IfNotPresent}
+      # 0 = no cap (also the built-in default). Set explicitly: the workers Plan needs 42h.
+      - {op: add, path: /data/SYSTEM_UPGRADE_JOB_ACTIVE_DEADLINE_SECONDS_MAX, value: "0"}

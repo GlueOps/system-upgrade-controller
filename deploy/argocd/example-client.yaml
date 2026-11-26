@@ -1,0 +1,20 @@
+# Example for one client cluster. Replace <client> and <tag>.
+# The client's Plans are not in Argo CD: kubectl apply them (see plans/).
+# Pin targetRevision per client: a script change re-hashes the Plans and starts a patch round on
+# every node of every client tracking that revision.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: <client>-system-upgrade-controller
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/GlueOps/system-upgrade-controller.git
+    targetRevision: <tag>
+    path: deploy/controller
+  destination:
+    name: <client>          # the client's cluster in Argo CD
+    namespace: system-upgrade
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}

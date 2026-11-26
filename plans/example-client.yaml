@@ -1,0 +1,106 @@
+# Per-client Plans. Copy for each client, change the fields marked "client:", then
+#   kubectl apply -f <client>-plans.yaml
+# Needs deploy/controller (controller, CRD, os-patch-scripts Secret, RBAC) installed first.
+#
+# Any change to a Plan's spec (settings, window, version, ...) starts a patch round on every node it
+# selects, at the next window. Settings and window live in the same object, so they apply together.
+#
+# Pause a node: kubectl label node <node> gluekube.io/os-patch=disabled
+# Start a new round with no other change: bump spec.version in both Plans.
+# Don't delete a Plan while its Jobs run: that kills the Job, possibly in the middle of apt.
+---
+# Control-plane nodes, one at a time, only while etcd and every control plane are healthy.
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: ubuntu-upgrade-masters
+  namespace: system-upgrade
+spec:
+  nodeSelector:
+    matchExpressions:
+      - {key: node-role.kubernetes.io/control-plane, operator: Exists}
+      - {key: gluekube.io/os-patch, operator: NotIn, values: ["disabled"]}
+  concurrency: 1
+  exclusive: true
+  jobActiveDeadlineSecs: 10800   # 3h: up to 2h etcd wait, drain, apt, reboot
+  postCompleteDelay: "3m"        # let a rebooted node settle before the next one starts
+  version: "2026-11-25"          # client: bump to start a round
+  tolerations:
+    - operator: Exists
+  serviceAccountName: system-upgrade
+  window:                        # client: Jobs only START inside it; a running one carries on
+    days: ["monday", "wednesday"]
+    startTime: "09:00"
+    endTime: "15:00"
+    timeZone: "UTC"
+  secrets:
+    - name: os-patch-scripts
+      path: /host/run/system-upgrade/secrets/os-patch-scripts
+  drain:
+    deleteEmptydirData: true
+    force: true
+    gracePeriod: 300
+    ignoreDaemonSets: true
+    timeout: 30m
+  prepare:
+    image: alpine/k8s:1.35.9     # kubectl + sh; keep near the cluster version
+    command: ["sh"]
+    args: ["/host/run/system-upgrade/secrets/os-patch-scripts/check-etcd.sh"]
+  upgrade:
+    image: ubuntu:24.04          # only used to chroot into the host
+    command: ["chroot", "/host"]
+    args: ["sh", "/run/system-upgrade/secrets/os-patch-scripts/upgrade.sh"]
+    envs:
+      - {name: PATCH_MODE, value: "security"}   # client: security | full (dist-upgrade)
+      - {name: HOLD_PACKAGES, value: ""}        # client: extra holds, space-separated
+---
+# Workers, one at a time: cordon, wait for Job pods, drain, patch, reboot if needed.
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: ubuntu-upgrade-workers
+  namespace: system-upgrade
+spec:
+  nodeSelector:
+    matchExpressions:
+      - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+      - {key: kubernetes.io/os, operator: In, values: ["linux"]}
+      - {key: gluekube.io/os-patch, operator: NotIn, values: ["disabled"]}
+      # client: e.g. limit to one pool: {key: pool, operator: In, values: [batch]}
+  concurrency: 1
+  exclusive: true
+  jobActiveDeadlineSecs: 151200  # 42h: must stay above WAIT_TIMEOUT_HOURS + drain + apt + reboot
+  postCompleteDelay: "2m"
+  version: "2026-11-25"          # client: bump to start a round
+  tolerations:
+    - operator: Exists
+  serviceAccountName: system-upgrade
+  window:                        # client
+    days: ["monday", "wednesday"]
+    startTime: "09:00"
+    endTime: "15:00"
+    timeZone: "UTC"
+  secrets:
+    - name: os-patch-scripts
+      path: /host/run/system-upgrade/secrets/os-patch-scripts
+  drain:
+    deleteEmptydirData: true
+    force: true
+    gracePeriod: 900
+    ignoreDaemonSets: true
+    timeout: 1h
+  prepare:
+    image: alpine/k8s:1.35.9
+    command: ["sh"]
+    args: ["/host/run/system-upgrade/secrets/os-patch-scripts/wait-for-jobs.sh"]
+    envs:
+      - {name: WAIT_TIMEOUT_HOURS, value: "40"}   # client: give up after this (node stays cordoned)
+      - {name: POLL_SECONDS, value: "300"}
+      - {name: BLOCKING_LABEL, value: "gluekube.io/drain-blocking"}   # <label>=true pods block too
+  upgrade:
+    image: ubuntu:24.04
+    command: ["chroot", "/host"]
+    args: ["sh", "/run/system-upgrade/secrets/os-patch-scripts/upgrade.sh"]
+    envs:
+      - {name: PATCH_MODE, value: "security"}   # client: same as the masters Plan
+      - {name: HOLD_PACKAGES, value: ""}        # client
